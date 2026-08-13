@@ -95,6 +95,22 @@ extern void BumpStats(MemoryContext context, MemoryStatsPrintFunc printfunc,
 extern void BumpCheck(MemoryContext context);
 #endif
 
+/* These functions implement the MemoryContext API for the Shmem context. */
+extern void *ShmemContextAlloc(MemoryContext context, Size size, int flags);
+extern void ShmemContextFree(void *pointer);
+extern void *ShmemContextRealloc(void *pointer, Size size, int flags);
+extern void ShmemContextReset(MemoryContext context);
+extern void ShmemContextDelete(MemoryContext context);
+extern MemoryContext ShmemContextGetChunkContext(void *pointer);
+extern Size ShmemContextGetChunkSpace(void *pointer);
+extern bool ShmemContextIsEmpty(MemoryContext context);
+extern void ShmemContextStats(MemoryContext context, MemoryStatsPrintFunc printfunc,
+					  void *passthru, MemoryContextCounters *totals,
+					  bool print_to_stderr);
+#ifdef MEMORY_CONTEXT_CHECKING
+extern void ShmemContextCheck(MemoryContext context);
+#endif
+
 /*
  * How many extra bytes do we need to request in order to ensure that we can
  * align a pointer to 'alignto'.  Since palloc'd pointers are already aligned
@@ -128,14 +144,14 @@ typedef enum MemoryContextMethodID
 	MCTX_SLAB_ID,
 	MCTX_ALIGNED_REDIRECT_ID,
 	MCTX_BUMP_ID,
-	MCTX_8_UNUSED_ID,
+	MCTX_SHMEM_ID,
 	MCTX_9_UNUSED_ID,
 	MCTX_10_UNUSED_ID,
 	MCTX_11_UNUSED_ID,
 	MCTX_12_UNUSED_ID,
 	MCTX_13_UNUSED_ID,
 	MCTX_14_UNUSED_ID,
-	MCTX_15_RESERVED_WIPEDMEM_ID	/* 1111 occurs in wipe_mem'd memory */
+	MCTX_15_RESERVED_WIPEDMEM_ID,	/* 1111 occurs in wipe_mem'd memory */
 } MemoryContextMethodID;
 
 /*

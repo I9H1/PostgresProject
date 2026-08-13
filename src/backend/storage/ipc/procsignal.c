@@ -36,6 +36,7 @@
 #include "storage/sinval.h"
 #include "storage/smgr.h"
 #include "storage/subsystems.h"
+#include "storage/shared_mapping.h"
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
@@ -591,6 +592,14 @@ ProcessProcSignalBarrier(void)
 					case PROCSIGNAL_BARRIER_UPDATE_XLOG_LOGICAL_INFO:
 						processed = ProcessBarrierUpdateXLogLogicalInfo();
 						break;
+            
+        			case PROCSIGNAL_BARRIER_SHMEM_ATTACH_ALL:
+            			processed = ProcessBarrierShmemAttachAll();
+            			break;
+            
+			        case PROCSIGNAL_BARRIER_SHMEM_DETACH:
+            			processed = ProcessBarrierShmemDetach();
+            			break;
 
 					case PROCSIGNAL_BARRIER_CHECKSUM_INPROGRESS_ON:
 					case PROCSIGNAL_BARRIER_CHECKSUM_ON:

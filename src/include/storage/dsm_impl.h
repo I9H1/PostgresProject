@@ -71,6 +71,11 @@ extern bool dsm_impl_op(dsm_op op, dsm_handle handle, Size request_size,
 						void **impl_private, void **mapped_address, Size *mapped_size,
 						int elevel);
 
+/* Attach a segment at a specific address. */
+extern bool dsm_impl_attach_at(dsm_handle handle, void *requested_address,
+                               void **impl_private, void **mapped_address,
+                               Size *mapped_size, bool allow_replace, int elevel);
+
 /* Implementation-dependent actions required to keep segment until shutdown. */
 extern void dsm_impl_pin_segment(dsm_handle handle, void *impl_private,
 								 void **impl_private_pm_handle);

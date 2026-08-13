@@ -75,6 +75,9 @@ static bool dsm_impl_posix(dsm_op op, dsm_handle handle, Size request_size,
 						   void **impl_private, void **mapped_address,
 						   Size *mapped_size, int elevel);
 static int	dsm_impl_posix_resize(int fd, off_t size);
+static bool dsm_impl_posix_attach_at(dsm_handle handle, void *requested_address,
+                   		   void **impl_private, void **mapped_address,
+                   		   Size *mapped_size, bool allow_replace, int elevel);
 #endif
 #ifdef USE_DSM_SYSV
 static bool dsm_impl_sysv(dsm_op op, dsm_handle handle, Size request_size,
@@ -90,6 +93,9 @@ static bool dsm_impl_windows(dsm_op op, dsm_handle handle, Size request_size,
 static bool dsm_impl_mmap(dsm_op op, dsm_handle handle, Size request_size,
 						  void **impl_private, void **mapped_address,
 						  Size *mapped_size, int elevel);
+static bool dsm_impl_mmap_attach_at(dsm_handle handle, void *requested_address,
+                   		  void **impl_private, void **mapped_address,
+                   		  Size *mapped_size, bool allow_replace, int elevel);
 #endif
 static int	errcode_for_dynamic_shared_memory(void);
 
@@ -1052,3 +1058,286 @@ errcode_for_dynamic_shared_memory(void)
 	else
 		return errcode_for_file_access();
 }
+
+/*
+ * dsm_impl_attach_at
+ *    Attach a DSM segment at a specific virtual address.
+ *
+ * This is like a normal attach, but uses MAP_FIXED_NOREPLACE (or equivalent)
+ * to map at the requested address.  If the address is already occupied,
+ * returns false with errno = EEXIST.
+ */
+bool
+dsm_impl_attach_at(dsm_handle handle, void *requested_address,
+                   void **impl_private, void **mapped_address,
+                   Size *mapped_size, bool allow_replace, int elevel)
+{
+    switch (dynamic_shared_memory_type)
+    {
+#ifdef USE_DSM_POSIX
+        case DSM_IMPL_POSIX:
+            return dsm_impl_posix_attach_at(handle, requested_address,
+                                            impl_private, mapped_address,
+                                            mapped_size, allow_replace, elevel);
+#endif
+#ifdef USE_DSM_MMAP
+        case DSM_IMPL_MMAP:
+            return dsm_impl_mmap_attach_at(handle, requested_address,
+                                           impl_private, mapped_address,
+                                           mapped_size, allow_replace, elevel);
+#endif
+        default:
+            elog(ERROR, "unexpected dynamic shared memory type: %d",
+                 dynamic_shared_memory_type);
+            return false;
+    }
+}
+
+#ifdef USE_DSM_MMAP
+
+static bool 
+dsm_impl_mmap_attach_at(dsm_handle handle, void *requested_address,
+                   		void **impl_private, void **mapped_address,
+                   		Size *mapped_size, bool allow_replace, int elevel)
+{
+	char name[64];
+	int fd;
+	char *address;
+	struct stat st;
+	Size segsize;
+
+	/* Form name of the file and open it */
+	snprintf(name, 64, PG_DYNSHMEM_DIR "/" PG_DYNSHMEM_MMAP_FILE_PREFIX "%u",
+			 handle);
+
+	if ((fd = OpenTransientFile(name, O_RDWR)) == -1)
+	{
+		ereport(elevel,
+					(errcode_for_dynamic_shared_memory(),
+					 errmsg("could not open shared memory segment \"%s\": %m",
+							name)));
+
+		return false;
+	}
+
+	/* Get size of segment */
+	if (fstat(fd, &st) != 0)
+	{
+		int save_errno = errno;
+		CloseTransientFile(fd);
+		errno = save_errno;
+		ereport(elevel,
+				(errcode_for_dynamic_shared_memory(),
+				 errmsg("could not stat shared memory segment \"%s\": %m",
+						name)));
+		return false;
+	}
+	segsize = st.st_size;
+
+	/* Map it */
+	if (allow_replace)
+	{
+		address = mmap(requested_address, segsize, PROT_READ | PROT_WRITE,
+				   MAP_SHARED | MAP_FIXED | MAP_HASSEMAPHORE | MAP_NOSYNC,
+				   fd, 0);
+	}
+	else {
+	/* Use MAP_FIXED_NOREPLACE if possible */
+#ifdef MAP_FIXED_NOREPLACE
+		address = mmap(requested_address, segsize, PROT_READ | PROT_WRITE,
+					   MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_HASSEMAPHORE | MAP_NOSYNC,
+					   fd, 0);
+
+#else
+		/* Try to map with PROT_NONE and see what happens */
+		void *test;
+		test = mmap(requested_address, segsize, PROT_NONE,
+					MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+					-1, 0);
+
+		if (test == MAP_FAILED)
+		{
+			int save_errno = errno;
+			CloseTransientFile(fd);
+			errno = save_errno;
+			ereport(elevel,
+					(errcode_for_dynamic_shared_memory(),
+				 	errmsg("could not map shared memory segment \"%s\": %m",
+							name)));
+			return false;
+		}
+
+		munmap(test, segsize);
+	
+		address = mmap(requested_address, segsize,
+        	           PROT_READ | PROT_WRITE,
+            	       MAP_SHARED | MAP_FIXED | MAP_HASSEMAPHORE | MAP_NOSYNC,
+                	   fd, 0);
+#endif
+	}
+
+	if (address == MAP_FAILED)
+	{
+		int save_errno = errno;
+		CloseTransientFile(fd);
+		errno = save_errno;
+		ereport(elevel,
+				(errcode_for_dynamic_shared_memory(),
+				 errmsg("could not map shared memory segment \"%s\": %m",
+						name)));
+		return false;
+	}
+
+	if (address != requested_address)
+	{
+		int save_errno = errno;
+		munmap(address, segsize);
+		CloseTransientFile(fd);
+		errno = save_errno;
+		ereport(elevel,
+				(errcode_for_dynamic_shared_memory(),
+				 errmsg("could not map shared memory segment \"%s\": %m",
+						name)));
+		return false;
+	}
+
+	*mapped_address = address;
+	*mapped_size = segsize;
+
+	if (CloseTransientFile(fd) != 0)
+	{
+		ereport(elevel,
+				(errcode_for_file_access(),
+				 errmsg("could not close shared memory segment \"%s\": %m",
+						name)));
+		return false;
+	}
+	
+	return true;
+}
+#endif
+
+#ifdef USE_DSM_POSIX
+
+static bool
+dsm_impl_posix_attach_at(dsm_handle handle, void *requested_address,
+                   		 void **impl_private, void **mapped_address,
+                   		 Size *mapped_size, bool allow_replace, int elevel)
+{
+	char name[64];
+	int fd;
+	char *address;
+	struct stat st;
+	Size segsize;
+
+	snprintf(name, 64, "/PostgreSQL.%u", handle);
+
+	/* Get FD and open file */
+	ReserveExternalFD();
+
+	if ((fd = shm_open(name, O_RDWR, PG_FILE_MODE_OWNER)) == -1)
+	{
+		ReleaseExternalFD();
+		ereport(elevel,
+			    (errcode_for_dynamic_shared_memory(),
+				 errmsg("could not open shared memory segment \"%s\": %m",
+						name)));
+		return false;
+	}
+
+	/* Get size of segment */
+	if (fstat(fd, &st) != 0)
+    {
+        int save_errno = errno;
+        close(fd);
+        ReleaseExternalFD();
+        errno = save_errno;
+        ereport(LOG,
+                (errcode_for_dynamic_shared_memory(),
+                 errmsg("could not stat shared memory segment \"%s\": %m",
+                        name)));
+        return false;
+    }
+    segsize = st.st_size;
+
+	/* Map it */
+	if (allow_replace)
+	{
+		address = mmap(requested_address, segsize, PROT_READ | PROT_WRITE,
+				   MAP_SHARED | MAP_FIXED | MAP_HASSEMAPHORE | MAP_NOSYNC,
+				   fd, 0);
+	}
+	else {
+#ifdef MAP_FIXED_NOREPLACE
+		address = mmap(requested_address, segsize, PROT_READ | PROT_WRITE,
+					   MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_HASSEMAPHORE | MAP_NOSYNC,
+					   fd, 0);
+#else
+	/* Try to map with PROT_NONE and see what happens */
+		void *test;
+		test = mmap(requested_address, segsize, PROT_NONE,
+					MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+					-1, 0);
+
+		if (test == MAP_FAILED)
+		{
+			int	save_errno;
+
+			/* Back out what's already been done. */
+			save_errno = errno;
+			close(fd);
+			ReleaseExternalFD();
+			errno = save_errno;
+
+			ereport(elevel,
+					(errcode_for_dynamic_shared_memory(),
+				 	 errmsg("could not map shared memory segment \"%s\": %m",
+							name)));
+			return false;
+		}
+
+		munmap(test, segsize);
+	
+		address = mmap(requested_address, segsize,
+        	           PROT_READ | PROT_WRITE,
+            	       MAP_SHARED | MAP_FIXED | MAP_HASSEMAPHORE | MAP_NOSYNC,
+                	   fd, 0);
+#endif
+	}
+
+	if (address == MAP_FAILED)
+	{
+		int save_errno = errno;
+        close(fd);
+        ReleaseExternalFD();
+        errno = save_errno;
+        ereport(elevel,
+                (errcode_for_dynamic_shared_memory(),
+                 errmsg("could not map shared memory segment \"%s\" at %p: %m",
+                        name, requested_address)));
+        return false;
+	}
+
+	if (address != requested_address)
+    {
+        int save_errno = errno;
+        munmap(address, segsize);
+        close(fd);
+        ReleaseExternalFD();
+        errno = save_errno;
+        ereport(LOG,
+                (errcode_for_dynamic_shared_memory(),
+                 errmsg("shared memory segment \"%s\" mapped at %p but requested %p",
+                        name, address, requested_address)));
+        return false;
+    }
+
+	*mapped_address = address;
+	*mapped_size = segsize;
+
+	close(fd);
+	ReleaseExternalFD();
+
+	return true;
+}
+#endif

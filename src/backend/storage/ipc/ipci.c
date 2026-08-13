@@ -24,6 +24,7 @@
 #include "storage/shmem_internal.h"
 #include "storage/subsystems.h"
 #include "utils/guc.h"
+#include "utils/shmem_context.h"
 
 /* GUCs */
 int			shared_memory_type = DEFAULT_SHARED_MEMORY_TYPE;
@@ -72,6 +73,9 @@ CalculateShmemSize(void)
 
 	/* include additional requested shmem from preload libraries */
 	size = add_size(size, total_addin_request);
+
+	/* include shmem requested for Shmem MemoryContext */
+	size = add_size(size, ShmemContextGetShmemSize());
 
 	/* might as well round it off to a multiple of a typical page size */
 	size = add_size(size, 8192 - (size % 8192));
@@ -148,6 +152,9 @@ CreateSharedMemoryAndSemaphores(void)
 
 	/* Initialize all shmem areas */
 	ShmemInitRequested();
+
+	/* Initialize Shmem MemoryContext */
+	ShmemContextInit();
 
 	/* Initialize dynamic shared memory facilities. */
 	dsm_postmaster_startup(shim);

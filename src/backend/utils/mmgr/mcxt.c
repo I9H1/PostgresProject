@@ -132,6 +132,20 @@ static const MemoryContextMethods mcxt_methods[] = {
 	[MCTX_BUMP_ID].check = BumpCheck,
 #endif
 
+	/* shmem_alloc.c */
+	[MCTX_SHMEM_ID].alloc = ShmemContextAlloc,
+	[MCTX_SHMEM_ID].free_p = ShmemContextFree,
+	[MCTX_SHMEM_ID].realloc = ShmemContextRealloc,
+	[MCTX_SHMEM_ID].reset = ShmemContextReset,
+	[MCTX_SHMEM_ID].delete_context = ShmemContextDelete,
+	[MCTX_SHMEM_ID].get_chunk_context = ShmemContextGetChunkContext,
+	[MCTX_SHMEM_ID].get_chunk_space = ShmemContextGetChunkSpace,
+	[MCTX_SHMEM_ID].is_empty = ShmemContextIsEmpty,
+	[MCTX_SHMEM_ID].stats = ShmemContextStats,
+#ifdef MEMORY_CONTEXT_CHECKING
+	[MCTX_SHMEM_ID].check = ShmemContextCheck,
+#endif
+
 
 	/*
 	 * Reserved and unused IDs should have dummy entries here.  This allows us
@@ -141,7 +155,6 @@ static const MemoryContextMethods mcxt_methods[] = {
 	 */
 	BOGUS_MCTX(MCTX_1_RESERVED_GLIBC_ID),
 	BOGUS_MCTX(MCTX_2_RESERVED_GLIBC_ID),
-	BOGUS_MCTX(MCTX_8_UNUSED_ID),
 	BOGUS_MCTX(MCTX_9_UNUSED_ID),
 	BOGUS_MCTX(MCTX_10_UNUSED_ID),
 	BOGUS_MCTX(MCTX_11_UNUSED_ID),

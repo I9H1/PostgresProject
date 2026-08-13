@@ -54,6 +54,9 @@ typedef enum
 	PROCSIGNAL_BARRIER_CHECKSUM_INPROGRESS_ON,
 	PROCSIGNAL_BARRIER_CHECKSUM_INPROGRESS_OFF,
 	PROCSIGNAL_BARRIER_CHECKSUM_ON,
+
+	PROCSIGNAL_BARRIER_SHMEM_ATTACH_ALL, /* Ask other processes to attach a dsm_segment */
+	PROCSIGNAL_BARRIER_SHMEM_DETACH,	 /* Ask all processes to detach a dsm_segment */
 } ProcSignalBarrierType;
 
 /*

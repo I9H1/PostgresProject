@@ -20,5 +20,6 @@ backend_sources += files(
   'sinvaladt.c',
   'standby.c',
   'waiteventset.c',
+  'shared_mapping.c',
 
 )

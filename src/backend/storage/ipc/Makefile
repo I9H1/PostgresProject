@@ -27,6 +27,7 @@ OBJS = \
 	sinval.o \
 	sinvaladt.o \
 	standby.o \
-	waiteventset.o
+	waiteventset.o \
+	shared_mapping.o
 
 include $(top_srcdir)/src/backend/common.mk

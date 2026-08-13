@@ -1,0 +1,5 @@
+# shmem_context_test extension
+comment = 'shmem_context_test'
+default_version = '1.0'
+module_pathname = '$libdir/shmem_context_test'
+relocatable = true

@@ -22,6 +22,7 @@ OBJS = \
 	mcxt.o \
 	memdebug.o \
 	portalmem.o \
-	slab.o
+	slab.o \
+	shmem_alloc.o
 
 include $(top_srcdir)/src/backend/common.mk

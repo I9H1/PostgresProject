@@ -2755,6 +2755,16 @@
   boot_val => '""',
 },
 
+{
+  name => 'shmem_context_memory_size', type => 'int', context => 'PGC_POSTMASTER', group => 'RESOURCES_MEM',
+  short_desc => 'Sets size of memory allocated for shmem_context.',
+  flags => 'GUC_UNIT_KB',
+  variable => 'shmem_context_memory_size_kb',
+  boot_val => '1048576',
+  min => '10240',
+  max => '10485760',
+},
+
 { name => 'ssl', type => 'bool', context => 'PGC_SIGHUP', group => 'CONN_AUTH_SSL',
   short_desc => 'Enables SSL connections.',
   variable => 'EnableSSL',

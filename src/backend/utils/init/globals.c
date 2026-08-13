@@ -135,6 +135,9 @@ double		hash_mem_multiplier = 2.0;
 int			maintenance_work_mem = 65536;
 int			max_parallel_maintenance_workers = 2;
 
+/* Size of memory for Shmem MemoryContext */
+int shmem_context_memory_size_kb = 1048576;
+
 /*
  * Primary determinants of sizes of shared-memory structures.
  *

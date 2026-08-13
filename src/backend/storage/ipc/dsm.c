@@ -757,6 +757,93 @@ dsm_attach(dsm_handle h)
 }
 
 /*
+ * Attach a dynamic shared memory segment at a fixed address
+ */
+dsm_segment *
+dsm_attach_at(dsm_handle h, void* requested_address, bool allow_replace)
+{
+	dsm_segment *seg = NULL;
+    void *impl_private = NULL;
+    void *mapped_address = NULL;
+    Size mapped_size = 0;
+    uint32 i;
+    uint32 nitems;
+
+	Assert(IsUnderPostmaster);
+
+	if (!dsm_init_done)
+        dsm_backend_startup();
+
+	if (!dsm_impl_attach_at(h, requested_address,
+                            &impl_private, &mapped_address,
+                            &mapped_size, allow_replace, ERROR))
+    {
+        elog(WARNING, "dsm_attach_at: failed to map segment %u at %p",
+             h, requested_address);
+        return NULL;
+    }
+
+	if (mapped_address != requested_address)
+    {
+        elog(WARNING, "dsm_attach_at: mapped at %p but requested %p",
+             mapped_address, requested_address);
+
+        dsm_impl_op(DSM_OP_DETACH, h, 0, &impl_private,
+                    &mapped_address, &mapped_size, WARNING);
+        return NULL;
+    }
+
+    /*
+     * Create a dsm_segment descriptor for this process.
+     * This is similar to what dsm_attach() does.
+     */
+    seg = dsm_create_descriptor();
+    seg->handle = h;
+    seg->impl_private = impl_private;
+    seg->mapped_address = mapped_address;
+    seg->mapped_size = mapped_size;
+    seg->control_slot = INVALID_CONTROL_SLOT;
+
+    /*
+     * Find the segment in the control segment and increment refcnt.
+     */
+    LWLockAcquire(DynamicSharedMemoryControlLock, LW_EXCLUSIVE);
+    nitems = dsm_control->nitems;
+	for (i = 0; i < nitems; ++i)
+    {
+        /* Skip unused slots and segments that are going away. */
+        if (dsm_control->item[i].refcnt <= 1)
+            continue;
+
+        if (dsm_control->item[i].handle == h)
+        {
+            dsm_control->item[i].refcnt++;
+            seg->control_slot = i;
+            break;
+        }
+    }
+    LWLockRelease(DynamicSharedMemoryControlLock);
+
+    if (seg->control_slot == INVALID_CONTROL_SLOT)
+    {
+    	/*
+         * This shouldn't happen: the segment should exist in the control
+         * segment because we created it via dsm_create() earlier.
+         */
+        elog(WARNING, "dsm_attach_at: segment %u not found in control segment",
+             h);
+        dsm_detach(seg);
+        return NULL;
+    }
+
+    elog(DEBUG1, "dsm_attach_at: backend %d attached segment %u (refcnt now %u)",
+         MyProcPid, h,
+         dsm_control->item[seg->control_slot].refcnt);
+
+    return seg;
+}
+
+/*
  * At backend shutdown time, detach any segments that are still attached.
  * (This is similar to dsm_detach_all, except that there's no reason to
  * unmap the control segment before exiting, so we don't bother.)
