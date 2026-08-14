@@ -11,6 +11,7 @@ typedef struct SharedMappingControl
     dsm_handle handle;
     void *address;
     pid_t coordinator_pid;
+    bool can_replace;
     pg_atomic_uint32 failed;
 
 } SharedMappingControl;

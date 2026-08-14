@@ -23,6 +23,7 @@ OBJS = \
 	memdebug.o \
 	portalmem.o \
 	slab.o \
-	shmem_alloc.o
+	shmem_alloc.o \
+	shmem_area_search.o
 
 include $(top_srcdir)/src/backend/common.mk

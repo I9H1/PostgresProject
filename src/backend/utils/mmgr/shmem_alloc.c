@@ -7,16 +7,26 @@
 #include "storage/procsignal.h"
 #include "utils/memutils_internal.h"
 #include "utils/wait_event_types.h"
+#include "utils/shmem_context.h"
 #include "nodes/memnodes.h"
 #include "sys/mman.h"
 #include "lib/ilist.h"
 #include "miscadmin.h"
 
+#define USE_RESERVED_ADDRESSES true
+#define MAX_ADDRESS_SEARCH_ATTEMPTS 3
+#define SEARCH_START_ADDRESS 0x10000
+
+#define CHUNK_HEADER_SIZE MAXALIGN(sizeof(ShmemChunkHeader))
+#define CONTROL_SIZE MAXALIGN(sizeof(ShmemContextControl))
+#define BLOCK_INFO_SIZE MAXALIGN(sizeof(ShmemBlockInfo))
+#define MAPPING_CONTROL_SIZE MAXALIGN(sizeof(SharedMappingControl))
+#define SHMEM_CONTEXT_SIZE MAXALIGN(sizeof(ShmemContextSet))
+
 #define SHM_RESERVED_START 0x00007F8000000000UL
 #define SHM_RESERVED_SIZE  (128ULL * 1024 * 1024 * 1024) /* 128 Gb */
 #define SHM_BLOCK_SIZE (64UL * 1024 * 1024) /* 64 Mb */
 #define SHM_MAX_BLOCKS (SHM_RESERVED_SIZE / SHM_BLOCK_SIZE)
-#define USE_RESERVED_ADDRESSES true
 
 extern int shmem_context_memory_size_kb;
 
@@ -95,10 +105,10 @@ ShmemContextGetShmemSize(void)
 {
     Size size = 0;
     
-    size = add_size(size, MAXALIGN(sizeof(ShmemContextControl)));
-    size = add_size(size, MAXALIGN(sizeof(SharedMappingControl)));
-    size = add_size(size, MAXALIGN(sizeof(ShmemContextSet)));
-    size = add_size(size, MAXALIGN(sizeof(ShmemChunkHeader)));
+    size = add_size(size, CONTROL_SIZE);
+    size = add_size(size, MAPPING_CONTROL_SIZE);
+    size = add_size(size, SHMEM_CONTEXT_SIZE);
+    size = add_size(size, CHUNK_HEADER_SIZE);
     size = add_size(size, MAXALIGN((Size)shmem_context_memory_size_kb) * 1024);
 
     return size;
@@ -120,23 +130,24 @@ ShmemContextInit(void)
 
     elog(LOG, "Size of memory requested for Shmem context: %lu", total_shmem_size);
 
-    elog(LOG, "Ctl at address %p size %lu", ctl, MAXALIGN(sizeof(ShmemContextControl)));
+    elog(LOG, "Ctl at address %p size %lu", ctl, CONTROL_SIZE);
 
     if (!found)
     {
         /* Initialization of sharedMappingControl */
-        sharedMappingControl = (SharedMappingControl *) ((char *)ctl + MAXALIGN(sizeof(ShmemContextControl)));
-        elog(LOG, "MappingCtl at address %p size %lu", sharedMappingControl, MAXALIGN(sizeof(SharedMappingControl)));
+        sharedMappingControl = (SharedMappingControl *) ((char *)ctl + CONTROL_SIZE);
+        elog(LOG, "MappingCtl at address %p size %lu", sharedMappingControl, MAPPING_CONTROL_SIZE);
 
         LWLockInitialize(&sharedMappingControl->lwlock, LW_EXCLUSIVE);
         sharedMappingControl->address = NULL;
         pg_atomic_init_u32(&sharedMappingControl->failed, 0);
         sharedMappingControl->generation = 0;
         sharedMappingControl->handle = DSM_HANDLE_INVALID;
+        sharedMappingControl->can_replace = false;
         elog(LOG, "SharedMappingControl initialized");
 
         /* Initialization of root context, which will be an ancestor to all shmem contexts */
-        root_context = (ShmemContextSet *) ((char *) sharedMappingControl + MAXALIGN(sizeof(SharedMappingControl)));
+        root_context = (ShmemContextSet *) ((char *) sharedMappingControl + MAPPING_CONTROL_SIZE);
         memset(root_context, 0, sizeof(ShmemContextSet));
 
         /* For now we use a foreign node, custom node is to be implemented */
@@ -146,33 +157,33 @@ ShmemContextInit(void)
                             NULL,
                             "root_shmem_context");
 
-        elog(LOG, "Root_context at address %p size %lu", root_context, MAXALIGN(sizeof(ShmemContextSet)));
+        elog(LOG, "Root_context at address %p size %lu", root_context, SHMEM_CONTEXT_SIZE);
 
         /* Initialization of first block */
         first_block = &ctl->blocks[0];
         memset(first_block, 0, sizeof(ShmemBlockInfo));
         first_block->size = total_shmem_size 
-                    - MAXALIGN(sizeof(ShmemContextControl))
-                    - MAXALIGN(sizeof(SharedMappingControl))
-                    - MAXALIGN(sizeof(ShmemContextSet));
+                    - CONTROL_SIZE
+                    - MAPPING_CONTROL_SIZE
+                    - SHMEM_CONTEXT_SIZE;
         first_block->handle = DSM_HANDLE_INVALID;
 
-        elog(LOG, "First blockInfo at address %p size %lu", first_block, MAXALIGN(sizeof(ShmemBlockInfo)));
+        elog(LOG, "First blockInfo at address %p size %lu", first_block, BLOCK_INFO_SIZE);
 
         /* Initialization of first_chunck */
-        first_chunck = (ShmemChunkHeader *) ((char *) root_context + MAXALIGN(sizeof(ShmemContextSet)));
+        first_chunck = (ShmemChunkHeader *) ((char *) root_context + SHMEM_CONTEXT_SIZE);
         memset(first_chunck, 0, sizeof(ShmemChunkHeader));
         first_chunck->context = root_context;
-        first_chunck->is_free = true;
-        first_chunck->size = first_block->size - MAXALIGN(sizeof(ShmemChunkHeader));
+        first_chunck->is_free = false;
+        first_chunck->size = first_block->size - CHUNK_HEADER_SIZE;
         first_chunck->next = NULL;
         first_chunck->prev = NULL;
         first_chunck->method_id = MCTX_SHMEM_ID;
 
         first_block->first_chunk = first_chunck;
 
-        elog(LOG, "First chunk header at address %p size %lu", first_chunck, MAXALIGN(sizeof(ShmemChunkHeader)));
-        elog(LOG, "First chunk space at address %p size %lu", (char* )first_chunck + MAXALIGN(sizeof(ShmemChunkHeader)), first_chunck->size);
+        elog(LOG, "First chunk header at address %p size %lu", first_chunck, CHUNK_HEADER_SIZE);
+        elog(LOG, "First chunk space at address %p size %lu", (char* )first_chunck + CHUNK_HEADER_SIZE, first_chunck->size);
 
         /* Initialization of control block */
 
@@ -209,7 +220,7 @@ ShmemContextInit(void)
         ctl->user_data = NULL;
         ctl->num_blocks = 1;
         dlist_init(&ctl->free_chunks);
-        dlist_push_head(&ctl->free_chunks, &first_chunck->free_node);
+        //dlist_push_head(&ctl->free_chunks, &first_chunck->free_node);
         LWLockInitialize(&ctl->lwLock, LW_EXCLUSIVE);
         ConditionVariableInit(&ctl->extendCV);
     }
@@ -238,7 +249,7 @@ ShmemContextCreate(MemoryContext parent, const char *name)
     context = (ShmemContextSet *) MemoryContextAllocZero(parent, sizeof(ShmemContextSet));
 
     elog(LOG, "context at %p, size of ShmemContextSet = %lu", context, sizeof(ShmemContextSet));
-    elog(LOG, "Chunk header before context at %p", (char*)context - MAXALIGN(sizeof(ShmemChunkHeader)));
+    elog(LOG, "Chunk header before context at %p", (char*)context - CHUNK_HEADER_SIZE);
 
     LWLockAcquire(&ctl->lwLock, LW_EXCLUSIVE);
 
@@ -272,9 +283,9 @@ IsContextShared(MemoryContext context)
         if (context == ShmemGetRootContext())
             return true;
 
-        if ((char *) context >= (char *) block->first_chunk + MAXALIGN(sizeof(ShmemChunkHeader)) &&
+        if ((char *) context >= (char *) block->first_chunk + CHUNK_HEADER_SIZE &&
                 (char *) context <= (char *) block->first_chunk 
-                + block->size - MAXALIGN(sizeof(ShmemContextSet)))
+                + block->size - SHMEM_CONTEXT_SIZE)
             return true;
     }
 
@@ -377,6 +388,7 @@ ShmemContextAlloc(MemoryContext context, Size size, int flags)
         if (chunk == NULL)
         {
             new_block = AddNewBlock();
+
             if (new_block == NULL)
             {
                 elog(WARNING, "Failed to add new block for allocation of size %lu", size);
@@ -396,9 +408,9 @@ ShmemContextAlloc(MemoryContext context, Size size, int flags)
         FinishExtend();
     }
 
-    result = (void *) ((char *) chunk + MAXALIGN(sizeof(ShmemChunkHeader)));
+    result = (void *) ((char *) chunk + CHUNK_HEADER_SIZE);
 
-    elog(LOG, "Chunk header at address %p size %lu", chunk, MAXALIGN(sizeof(ShmemChunkHeader)));
+    elog(LOG, "Chunk header at address %p size %lu", chunk, CHUNK_HEADER_SIZE);
     elog(LOG, "Allocated space at address %p size %lu", result, size);
 
     return result;
@@ -450,7 +462,7 @@ FindFreeChunk(Size size)
             return chunk;
         }
     }
-        
+
     return NULL;
 }
 
@@ -469,13 +481,13 @@ ClaimFreeChunk(Size size, MemoryContext context)
     }
 
     /* If size of potential new chunk >= size of header, split chunk into two */
-    if (chunk->size - size >= 2 * MAXALIGN(sizeof(ShmemChunkHeader)))
+    if (chunk->size - size >= 2 * CHUNK_HEADER_SIZE)
     {
         ShmemChunkHeader *new_chunk = (ShmemChunkHeader *) ((char *) chunk + size + 
-                                                MAXALIGN(sizeof(ShmemChunkHeader)));
+                                                CHUNK_HEADER_SIZE);
         new_chunk->is_free = true;
         new_chunk->next = chunk->next;
-        new_chunk->size = chunk->size - size - MAXALIGN(sizeof(ShmemChunkHeader));
+        new_chunk->size = chunk->size - size - CHUNK_HEADER_SIZE;
         new_chunk->prev = chunk;
         new_chunk->method_id = MCTX_SHMEM_ID;
         if (new_chunk->next != NULL)
@@ -483,8 +495,8 @@ ClaimFreeChunk(Size size, MemoryContext context)
         dlist_push_head(&ctl->free_chunks, &new_chunk->free_node);
         chunk->next = new_chunk;
         chunk->size = size;
-        ctl->total_free -= MAXALIGN(sizeof(ShmemChunkHeader));
-        ctl->total_metadata += MAXALIGN(sizeof(ShmemChunkHeader));
+        ctl->total_free -= CHUNK_HEADER_SIZE;
+        ctl->total_metadata += CHUNK_HEADER_SIZE;
     }
 
     chunk->is_free = false;
@@ -522,28 +534,31 @@ AddNewBlock(void)
     }
 
     /* Get virtual address for new block */
-    if (ctl->next_reserved_addr != NULL)
+    if (USE_RESERVED_ADDRESSES)
     {
-        addr = ctl->next_reserved_addr;
-        ctl->next_reserved_addr = (char *) addr + block_size;
-    } 
-    else 
-    {
-        elog(WARNING, "No reserved space for new blocks is available");
-        return NULL;
-    }
+        if (ctl->next_reserved_addr != NULL)
+        {
+            addr = ctl->next_reserved_addr;
+            ctl->next_reserved_addr = (char *) addr + block_size;
+        } 
+        else 
+        {
+            elog(WARNING, "No reserved space for new blocks is available");
+            return NULL;
+        }
 
-    if (addr != (void *) ((uintptr_t) addr & ~4095))
-    {
-        elog(WARNING, "Block address is not aligned");
-        return NULL;
-    }
+        if (addr != (void *) ((uintptr_t) addr & ~4095))
+        {
+            elog(WARNING, "Block address is not aligned");
+            return NULL;
+        }
 
-    /* Check if we are out of reserved space */
-    if ((char *) ctl->next_reserved_addr > (char *) SHM_RESERVED_START + SHM_RESERVED_SIZE)
-    {
-        elog(WARNING, "Reserved space for new blocks is exhausted");
-        return NULL;
+        /* Check if we are out of reserved space */
+        if ((char *) ctl->next_reserved_addr > (char *) SHM_RESERVED_START + SHM_RESERVED_SIZE)
+        {
+            elog(WARNING, "Reserved space for new blocks is exhausted");
+            return NULL;
+        }
     }
 
     /* Creating dsm segment */
@@ -569,36 +584,110 @@ AddNewBlock(void)
      */
     dsm_pin_segment(segment);
     dsm_detach(segment);
+
+    /* Publish mapping parameters */
+    if (sharedMappingControl == NULL)
+    {
+        elog(WARNING, "SharedMappingControl was not initialized");
+        dsm_unpin_segment(handle);
+        return NULL;
+    }
+
+    /* All processes map */
+    if (USE_RESERVED_ADDRESSES)
+    {
+        LWLockAcquire(&sharedMappingControl->lwlock, LW_EXCLUSIVE);
+
+        sharedMappingControl->address = addr;
+        sharedMappingControl->generation++;
+        sharedMappingControl->handle = handle;
+        sharedMappingControl->can_replace = true;
+        pg_atomic_write_u32(&sharedMappingControl->failed, 0);
+        
+        LWLockRelease(&sharedMappingControl->lwlock);
+        elog(LOG, "AddNewBlock: published mapping params;");
+
+        generation = EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SHMEM_ATTACH_ALL);
+        WaitForProcSignalBarrier(generation);
+
+        failed_count = pg_atomic_read_u32(&sharedMappingControl->failed);
     
-    /* Map segment in current process */
-    segment = dsm_attach_at(handle, addr, true);
-
-    if (segment == NULL)
+        if (failed_count > 0)
+        {
+            elog(WARNING, "Processes failed to attach segment");
+            generation = EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SHMEM_DETACH);
+            WaitForProcSignalBarrier(generation);
+            dsm_unpin_segment(handle);
+            return NULL;
+        }
+    }
+    else
     {
-        elog(WARNING, "Failed to attach DSM at %p", addr);
-        dsm_unpin_segment(handle);
-        return NULL;
+        /* Try to find a free block */
+        unsigned long search_from = SEARCH_START_ADDRESS;
+        int attempt;
+
+        for (attempt = 0; attempt < MAX_ADDRESS_SEARCH_ATTEMPTS; ++attempt)
+        {
+            addr = GetNewShmemArea(block_size, search_from);
+            
+            if (addr == NULL)
+            {
+                elog(WARNING, "Failed to find address for new block");
+                break;
+            }
+
+            if (addr != (void *) ((uintptr_t) addr & ~4095))
+            {
+                elog(WARNING, "Proposed block address is not aligned");
+                search_from = (unsigned long) addr + block_size;
+                continue;
+            }
+
+            /* Publish new mapping params */
+            LWLockAcquire(&sharedMappingControl->lwlock, LW_EXCLUSIVE);
+
+            sharedMappingControl->address = addr;
+            sharedMappingControl->generation++;
+            sharedMappingControl->handle = handle;
+            sharedMappingControl->can_replace = false;
+            pg_atomic_write_u32(&sharedMappingControl->failed, 0);
+
+            LWLockRelease(&sharedMappingControl->lwlock);
+
+            /* Emit barrier signals */
+            generation = EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SHMEM_ATTACH_ALL);
+            WaitForProcSignalBarrier(generation);
+
+            failed_count = pg_atomic_read_u32(&sharedMappingControl->failed);
+            if (failed_count > 0)
+            {
+                elog(WARNING, "Processes failed to attach proposed segment");
+                generation = EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SHMEM_DETACH);
+                WaitForProcSignalBarrier(generation);
+                continue;
+            }
+
+            break;
+        }
+
+        failed_count = pg_atomic_read_u32(&sharedMappingControl->failed);
+        if (failed_count > 0)
+        {
+            elog(WARNING, "Adding block with address search failed");
+            return NULL;
+        }
     }
 
-    if (dsm_segment_address(segment) != addr)
-    {
-        elog(WARNING, "Mapped at %p but requested %p", 
-        dsm_segment_address(segment), addr);
-        dsm_detach(segment);
-        dsm_unpin_segment(handle);
-        return NULL;
-    }
-
-    dsm_pin_mapping(segment);
+    elog(LOG, "Processes mapped successfully");
 
     /* Initialize structures for new block */
     new_block = &ctl->blocks[ctl->num_blocks];
     new_block->size = SHM_BLOCK_SIZE;
     new_block->handle = handle;
-
     new_chunk = (ShmemChunkHeader *) addr;
     new_chunk->context = (ShmemContextSet *) ShmemGetRootContext();
-    new_chunk->size = new_block->size - MAXALIGN(sizeof(ShmemChunkHeader));
+    new_chunk->size = new_block->size - CHUNK_HEADER_SIZE;
     new_chunk->is_free = true;
     new_chunk->method_id = MCTX_SHMEM_ID;
     new_chunk->prev = NULL;
@@ -609,53 +698,13 @@ AddNewBlock(void)
     elog(LOG, "AddNewBlock: new block at %p, chunk at %p (size %zu)",
          new_block, new_chunk, new_chunk->size);
 
-    /* Publish mapping parameters */
-    if (sharedMappingControl == NULL)
-    {
-        elog(WARNING, "SharedMappingControl was not initialized");
-        dsm_detach(segment);
-        dsm_unpin_segment(handle);
-        return NULL;
-    }
-
-    LWLockAcquire(&sharedMappingControl->lwlock, LW_EXCLUSIVE);
-
-    sharedMappingControl->address = addr;
-    sharedMappingControl->generation++;
-    sharedMappingControl->handle = handle;
-    pg_atomic_write_u32(&sharedMappingControl->failed, 0);
-    sharedMappingControl->coordinator_pid = MyProcPid;
-
-    elog(LOG, "coord. pid: %d", MyProcPid);
-
-    LWLockRelease(&sharedMappingControl->lwlock);
-
-    elog(LOG, "AddNewBlock: published mapping params;");
-
-    /* All processes map */
-    generation = EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SHMEM_ATTACH_ALL);
-    WaitForProcSignalBarrier(generation);
-
-    failed_count = pg_atomic_read_u32(&sharedMappingControl->failed);
-    
-    if (failed_count > 0)
-    {
-        elog(WARNING, "Processes failed to attach segment");
-        generation = EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SHMEM_DETACH);
-        WaitForProcSignalBarrier(generation);
-        dsm_unpin_segment(handle);
-        return NULL;
-    }
-
-    elog(LOG, "Processes mapped successfully");
-
     /* Add new block to the block list */
     LWLockAcquire(&ctl->lwLock, LW_EXCLUSIVE);
     
     ctl->num_blocks++;
     ctl->total_allocated += new_block->size;
     ctl->total_free += new_chunk->size;
-    ctl->total_metadata += MAXALIGN(sizeof(ShmemChunkHeader));
+    ctl->total_metadata += CHUNK_HEADER_SIZE;
     dlist_push_head(&ctl->free_chunks, &new_chunk->free_node);
 
     LWLockRelease(&ctl->lwLock);
@@ -683,7 +732,7 @@ ShmemContextFree(void *pointer)
     }
 
     /* Can also add magic number to Header and check it */
-    chunk = (ShmemChunkHeader *)((char *) pointer - MAXALIGN(sizeof(ShmemChunkHeader)));
+    chunk = (ShmemChunkHeader *)((char *) pointer - CHUNK_HEADER_SIZE);
 
     if (chunk->method_id != MCTX_SHMEM_ID)
     {
@@ -707,19 +756,19 @@ ShmemContextFree(void *pointer)
 
     if (chunk->next != NULL && chunk->next->is_free)
     {
-        chunk->size += chunk->next->size + MAXALIGN(sizeof(ShmemChunkHeader));
+        chunk->size += chunk->next->size + CHUNK_HEADER_SIZE;
         dlist_delete_from(&ctl->free_chunks, &chunk->next->free_node);
         chunk->next = chunk->next->next;
         if (chunk->next != NULL)
             chunk->next->prev = chunk;
 
-        ctl->total_free += MAXALIGN(sizeof(ShmemChunkHeader));
-        ctl->total_metadata -= MAXALIGN(sizeof(ShmemChunkHeader));
+        ctl->total_free += CHUNK_HEADER_SIZE;
+        ctl->total_metadata -= CHUNK_HEADER_SIZE;
     }
 
     if (chunk->prev != NULL && chunk->prev->is_free)
     {
-        chunk->prev->size += chunk->size + MAXALIGN(sizeof(ShmemChunkHeader));
+        chunk->prev->size += chunk->size + CHUNK_HEADER_SIZE;
         dlist_delete_from(&ctl->free_chunks, &chunk->free_node);
         chunk->prev->next = chunk->next;
         if (chunk->next)
@@ -727,8 +776,8 @@ ShmemContextFree(void *pointer)
 
         chunk = chunk->prev;
 
-        ctl->total_free += MAXALIGN(sizeof(ShmemChunkHeader));
-        ctl->total_metadata -= MAXALIGN(sizeof(ShmemChunkHeader));
+        ctl->total_free += CHUNK_HEADER_SIZE;
+        ctl->total_metadata -= CHUNK_HEADER_SIZE;
     }
 
     pointer = NULL;
@@ -763,20 +812,20 @@ ShmemContextRealloc(void *pointer, Size size, int flags)
 
     size = MAXALIGN(size);
     
-    chunk = (ShmemChunkHeader *)((char *) pointer - MAXALIGN(sizeof(ShmemChunkHeader)));
+    chunk = (ShmemChunkHeader *)((char *) pointer - CHUNK_HEADER_SIZE);
     set = chunk->context;
 
     LWLockAcquire(&ctl->lwLock, LW_EXCLUSIVE);
 
     if (size <= chunk->size)
     {
-        if (chunk->size - size >= 2 * MAXALIGN(sizeof(ShmemChunkHeader)))
+        if (chunk->size - size >= 2 * CHUNK_HEADER_SIZE)
         {
             ShmemChunkHeader *new_chunk = (ShmemChunkHeader *) ((char *) chunk + size 
-                                                                + MAXALIGN(sizeof(ShmemChunkHeader)));
+                                                                + CHUNK_HEADER_SIZE);
             new_chunk->is_free = true;
             new_chunk->next = chunk->next;
-            new_chunk->size = chunk->size - size - MAXALIGN(sizeof(ShmemChunkHeader));
+            new_chunk->size = chunk->size - size - CHUNK_HEADER_SIZE;
             new_chunk->prev = chunk;
             new_chunk->method_id = MCTX_SHMEM_ID;
             if (new_chunk->next != NULL) 
@@ -788,8 +837,8 @@ ShmemContextRealloc(void *pointer, Size size, int flags)
 
             ctl->total_used -= new_chunk->size;
             ctl->total_free += new_chunk->size;
-            ctl->total_used -= MAXALIGN(sizeof(ShmemChunkHeader));
-            ctl->total_metadata += MAXALIGN(sizeof(ShmemChunkHeader));
+            ctl->total_used -= CHUNK_HEADER_SIZE;
+            ctl->total_metadata += CHUNK_HEADER_SIZE;
         }
 
         LWLockRelease(&ctl->lwLock);
@@ -806,7 +855,7 @@ ShmemContextRealloc(void *pointer, Size size, int flags)
         return NULL;
     }
 
-    src = (void *)((char *) chunk + MAXALIGN(sizeof(ShmemChunkHeader)));
+    src = (void *)((char *) chunk + CHUNK_HEADER_SIZE);
 
     memcpy(result, src, chunk->size);
 
@@ -841,19 +890,19 @@ ShmemContextReset(MemoryContext context)
                 /* Trying to merge with free neighbours */
                 if (chunk->next != NULL && chunk->next->is_free)
                 {
-                    chunk->size += chunk->next->size + MAXALIGN(sizeof(ShmemChunkHeader));
+                    chunk->size += chunk->next->size + CHUNK_HEADER_SIZE;
                     dlist_delete_from(&ctl->free_chunks, &chunk->next->free_node);
                     chunk->next = chunk->next->next;
                     if (chunk->next != NULL)
                         chunk->next->prev = chunk;
 
-                    ctl->total_free += MAXALIGN(sizeof(ShmemChunkHeader));
-                    ctl->total_metadata -= MAXALIGN(sizeof(ShmemChunkHeader));
+                    ctl->total_free += CHUNK_HEADER_SIZE;
+                    ctl->total_metadata -= CHUNK_HEADER_SIZE;
                 }
 
                 if (chunk->prev != NULL && chunk->prev->is_free)
                 {
-                    chunk->prev->size += chunk->size + MAXALIGN(sizeof(ShmemChunkHeader));
+                    chunk->prev->size += chunk->size + CHUNK_HEADER_SIZE;
                     dlist_delete_from(&ctl->free_chunks, &chunk->free_node);
                     chunk->prev->next = chunk->next;
                     if (chunk->next != NULL)
@@ -862,8 +911,8 @@ ShmemContextReset(MemoryContext context)
                     /* Changing ptr because we merged chunks */
                     chunk = chunk->prev;
 
-                    ctl->total_free += MAXALIGN(sizeof(ShmemChunkHeader));
-                    ctl->total_metadata -= MAXALIGN(sizeof(ShmemChunkHeader));
+                    ctl->total_free += CHUNK_HEADER_SIZE;
+                    ctl->total_metadata -= CHUNK_HEADER_SIZE;
                 }
             }
             chunk = chunk->next;
@@ -894,8 +943,8 @@ ShmemGetRootContext(void)
     if (ctl == NULL)
         return NULL;
 
-    return (MemoryContext) ((char *) ctl + MAXALIGN(sizeof(ShmemContextControl))
-                                         + MAXALIGN(sizeof(SharedMappingControl))); 
+    return (MemoryContext) ((char *) ctl + CONTROL_SIZE
+                                         + MAPPING_CONTROL_SIZE); 
 }
 
 MemoryContext
@@ -913,7 +962,7 @@ ShmemContextGetChunkContext(void *pointer)
         return NULL;
     }
 
-    chunk = (ShmemChunkHeader *) ((char *) pointer - MAXALIGN(sizeof(ShmemChunkHeader)));
+    chunk = (ShmemChunkHeader *) ((char *) pointer - CHUNK_HEADER_SIZE);
 
     return (MemoryContext) chunk->context;
 }
@@ -933,7 +982,7 @@ ShmemContextGetChunkSpace(void *pointer)
         return -1;
     }
 
-    chunk = (ShmemChunkHeader *) ((char *) pointer - MAXALIGN(sizeof(ShmemChunkHeader)));
+    chunk = (ShmemChunkHeader *) ((char *) pointer - CHUNK_HEADER_SIZE);
 
     return chunk->size;
 }

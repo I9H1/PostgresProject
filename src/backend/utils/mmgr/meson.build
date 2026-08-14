@@ -11,5 +11,6 @@ backend_sources += files(
   'memdebug.c',
   'portalmem.c',
   'slab.c',
-  'shmem_alloc.c'
+  'shmem_alloc.c',
+  'shmem_area_search.c'
 )

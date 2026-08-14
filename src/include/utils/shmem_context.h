@@ -16,5 +16,6 @@ extern void ShmemContextInit(void);
 MemoryContext ShmemGetRootContext(void);
 void *ShmemGetOrCreateUserData(Size size);
 extern bool StartShmemContext(void);
+extern void *GetNewShmemArea(Size size, unsigned long search_from);
 
 #endif //POSTGRESQL_SHMEM_CONTEXT_H
