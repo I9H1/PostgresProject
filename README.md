@@ -1,21 +1,19 @@
-PostgreSQL Database Management System
+PostgreSQL with Shared Memory Context 
 =====================================
 
 This directory contains the source code distribution of the PostgreSQL
 database management system.
 
-PostgreSQL is an advanced object-relational database management system
-that supports an extended subset of the SQL standard, including
-transactions, foreign keys, subqueries, triggers, user-defined types
-and functions.  This distribution also contains C language bindings.
+Main changes for ShmemContext can be found in files:
 
-Copyright and license information can be found in the file COPYRIGHT.
+src/backend/utils/mmgr/shmem_alloc.c
 
-General documentation about this version of PostgreSQL can be found at
-<https://www.postgresql.org/docs/devel/>.  In particular, information
-about building PostgreSQL from the source code can be found at
-<https://www.postgresql.org/docs/devel/installation.html>.
+src/backend/storage/ipc/dsm.c
+src/backend/storage/ipc/dsm_impl.c
+src/backend/storage/ipc/shared_mapping.c
 
-The latest version of this software, and related software, may be
-obtained at <https://www.postgresql.org/download/>.  For more information
-look at our web site located at <https://www.postgresql.org/>.
+src/include/utils/shmem_context.h
+src/include/storage/shared_mapping.h
+
+Extension with simple tests:
+contrib/shmem_context_test/
