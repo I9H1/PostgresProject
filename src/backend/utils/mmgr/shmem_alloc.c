@@ -1,20 +1,22 @@
 #include "postgres.h"
-#include "utils/memutils_internal.h"
 #include "storage/shmem.h"
 #include "storage/shared_mapping.h"
-#include "nodes/memnodes.h"
 #include "storage/lwlock.h"
 #include "storage/condition_variable.h"
 #include "storage/dsm.h"
 #include "storage/procsignal.h"
+#include "utils/memutils_internal.h"
 #include "utils/wait_event_types.h"
-#include "miscadmin.h"
+#include "nodes/memnodes.h"
 #include "sys/mman.h"
+#include "lib/ilist.h"
+#include "miscadmin.h"
 
 #define SHM_RESERVED_START 0x00007F8000000000UL
 #define SHM_RESERVED_SIZE  (128ULL * 1024 * 1024 * 1024) /* 128 Gb */
 #define SHM_BLOCK_SIZE (64UL * 1024 * 1024) /* 64 Mb */
 #define SHM_MAX_BLOCKS (SHM_RESERVED_SIZE / SHM_BLOCK_SIZE)
+#define USE_RESERVED_ADDRESSES true
 
 extern int shmem_context_memory_size_kb;
 
@@ -33,6 +35,7 @@ typedef struct ShmemChunkHeader {
     bool is_free;
     ShmemChunkHeader *next;
     ShmemChunkHeader *prev;
+    dlist_node free_node;
     uint64 method_id;
 } ShmemChunkHeader;
 
@@ -56,6 +59,7 @@ typedef struct ShmemContextControl {
     Size total_metadata;
 
     int num_blocks;
+    dlist_head free_chunks;
     ShmemBlockInfo blocks[SHM_MAX_BLOCKS];
 
     void *next_reserved_addr;
@@ -173,20 +177,27 @@ ShmemContextInit(void)
         /* Initialization of control block */
 
         /* Reserve huge region of virtual memory for new blocks */
-        reserved = mmap((void *)SHM_RESERVED_START, SHM_RESERVED_SIZE,
-                      PROT_NONE,
-                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
-                      -1, 0);
+        if (USE_RESERVED_ADDRESSES) 
+        {
+            reserved = mmap((void *)SHM_RESERVED_START, SHM_RESERVED_SIZE,
+                            PROT_NONE,
+                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+                            -1, 0);
 
-        if (reserved == MAP_FAILED)
-        {
-            elog(ERROR, "Failed to reserve virtual memory at %p: %m", 
-            (void *)SHM_RESERVED_START);
-            ctl->next_reserved_addr = NULL;
+            if (reserved == MAP_FAILED)
+            {
+                elog(ERROR, "Failed to reserve virtual memory at %p: %m", 
+                (void *)SHM_RESERVED_START);
+                ctl->next_reserved_addr = NULL;
+            }
+            else
+            {
+                ctl->next_reserved_addr = (void *)SHM_RESERVED_START;
+            }
         }
-        else
+        else 
         {
-            ctl->next_reserved_addr = (void *)SHM_RESERVED_START;
+            ctl->next_reserved_addr = NULL;
         }
 
         ctl->total_allocated = total_shmem_size;
@@ -197,6 +208,8 @@ ShmemContextInit(void)
         ctl->magic = 0xDEADBEEF12345678ULL;
         ctl->user_data = NULL;
         ctl->num_blocks = 1;
+        dlist_init(&ctl->free_chunks);
+        dlist_push_head(&ctl->free_chunks, &first_chunck->free_node);
         LWLockInitialize(&ctl->lwLock, LW_EXCLUSIVE);
         ConditionVariableInit(&ctl->extendCV);
     }
@@ -426,23 +439,18 @@ FinishExtend(void)
 static ShmemChunkHeader *
 FindFreeChunk(Size size)
 {
-    ShmemBlockInfo *block;
+    dlist_iter iter;
     ShmemChunkHeader *chunk;
 
-    for (int i = 0; i < ctl->num_blocks; ++i) 
+    dlist_foreach(iter, &ctl->free_chunks)
     {
-        block = &ctl->blocks[i];
-        chunk = block->first_chunk;
-        while (chunk != NULL)
+        chunk = dlist_container(ShmemChunkHeader, free_node, iter.cur);
+        if (chunk->is_free && chunk->size >= size)
         {
-            if (chunk->is_free && chunk->size >= size)
-            {
-                return chunk;
-            }
-            chunk = chunk->next;
+            return chunk;
         }
     }
-
+        
     return NULL;
 }
 
@@ -472,6 +480,7 @@ ClaimFreeChunk(Size size, MemoryContext context)
         new_chunk->method_id = MCTX_SHMEM_ID;
         if (new_chunk->next != NULL)
             new_chunk->next->prev = new_chunk;
+        dlist_push_head(&ctl->free_chunks, &new_chunk->free_node);
         chunk->next = new_chunk;
         chunk->size = size;
         ctl->total_free -= MAXALIGN(sizeof(ShmemChunkHeader));
@@ -479,6 +488,7 @@ ClaimFreeChunk(Size size, MemoryContext context)
     }
 
     chunk->is_free = false;
+    dlist_delete_from(&ctl->free_chunks, &chunk->free_node);
     chunk->context = (ShmemContextSet *) context;
     chunk->method_id = MCTX_SHMEM_ID;
 
@@ -603,6 +613,8 @@ AddNewBlock(void)
     if (sharedMappingControl == NULL)
     {
         elog(WARNING, "SharedMappingControl was not initialized");
+        dsm_detach(segment);
+        dsm_unpin_segment(handle);
         return NULL;
     }
 
@@ -631,6 +643,7 @@ AddNewBlock(void)
         elog(WARNING, "Processes failed to attach segment");
         generation = EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SHMEM_DETACH);
         WaitForProcSignalBarrier(generation);
+        dsm_unpin_segment(handle);
         return NULL;
     }
 
@@ -643,6 +656,7 @@ AddNewBlock(void)
     ctl->total_allocated += new_block->size;
     ctl->total_free += new_chunk->size;
     ctl->total_metadata += MAXALIGN(sizeof(ShmemChunkHeader));
+    dlist_push_head(&ctl->free_chunks, &new_chunk->free_node);
 
     LWLockRelease(&ctl->lwLock);
 
@@ -685,6 +699,7 @@ ShmemContextFree(void *pointer)
     }
     
     chunk->is_free = true;
+    dlist_push_head(&ctl->free_chunks, &chunk->free_node);
     ctl->total_used -= chunk->size;
     ctl->total_free += chunk->size;
     
@@ -693,6 +708,7 @@ ShmemContextFree(void *pointer)
     if (chunk->next != NULL && chunk->next->is_free)
     {
         chunk->size += chunk->next->size + MAXALIGN(sizeof(ShmemChunkHeader));
+        dlist_delete_from(&ctl->free_chunks, &chunk->next->free_node);
         chunk->next = chunk->next->next;
         if (chunk->next != NULL)
             chunk->next->prev = chunk;
@@ -704,6 +720,7 @@ ShmemContextFree(void *pointer)
     if (chunk->prev != NULL && chunk->prev->is_free)
     {
         chunk->prev->size += chunk->size + MAXALIGN(sizeof(ShmemChunkHeader));
+        dlist_delete_from(&ctl->free_chunks, &chunk->free_node);
         chunk->prev->next = chunk->next;
         if (chunk->next)
             chunk->next->prev = chunk->prev;
@@ -764,6 +781,7 @@ ShmemContextRealloc(void *pointer, Size size, int flags)
             new_chunk->method_id = MCTX_SHMEM_ID;
             if (new_chunk->next != NULL) 
                 new_chunk->next->prev = new_chunk;
+            dlist_push_head(&ctl->free_chunks, &new_chunk->free_node);
 
             chunk->next = new_chunk;
             chunk->size = size;
@@ -816,6 +834,7 @@ ShmemContextReset(MemoryContext context)
             if (chunk->context == set && !chunk->is_free)
             {
                 chunk->is_free = true;
+                dlist_push_head(&ctl->free_chunks, &chunk->free_node);
                 ctl->total_used -= chunk->size;
                 ctl->total_free += chunk->size;
 
@@ -823,6 +842,7 @@ ShmemContextReset(MemoryContext context)
                 if (chunk->next != NULL && chunk->next->is_free)
                 {
                     chunk->size += chunk->next->size + MAXALIGN(sizeof(ShmemChunkHeader));
+                    dlist_delete_from(&ctl->free_chunks, &chunk->next->free_node);
                     chunk->next = chunk->next->next;
                     if (chunk->next != NULL)
                         chunk->next->prev = chunk;
@@ -834,6 +854,7 @@ ShmemContextReset(MemoryContext context)
                 if (chunk->prev != NULL && chunk->prev->is_free)
                 {
                     chunk->prev->size += chunk->size + MAXALIGN(sizeof(ShmemChunkHeader));
+                    dlist_delete_from(&ctl->free_chunks, &chunk->free_node);
                     chunk->prev->next = chunk->next;
                     if (chunk->next != NULL)
                         chunk->next->prev = chunk->prev;
@@ -1025,6 +1046,13 @@ ShmemContextCheck(MemoryContext context)
     ShmemBlockInfo *block;
     ShmemChunkHeader *chunk;
 
+    int free_nodes_count = 0;
+    int free_flags_count = 0;
+    dlist_iter iter;
+
+    dlist_foreach(iter, &ctl->free_chunks)
+        free_nodes_count++;
+
     LWLockAcquire(&ctl->lwLock, LW_SHARED);
 
     if (ctl->total_allocated != ctl->total_used + ctl->total_free + ctl->total_metadata)
@@ -1044,8 +1072,15 @@ ShmemContextCheck(MemoryContext context)
                 elog(WARNING, "problem in shmem context set %s: chunk list is corrupted at chunk %p ",
 			    		 context->name, chunk->next);
 
+            if (chunk->is_free)
+                free_flags_count++;
+
             chunk = chunk->next;
         }
     }
+
+    if (free_flags_count != free_nodes_count)
+        elog(WARNING, "Free chunks list and chunks free flags are not consistant");
+
     LWLockRelease(&ctl->lwLock);
 }
