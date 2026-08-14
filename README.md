@@ -7,6 +7,7 @@ database management system.
 Main changes for ShmemContext can be found in files:
 
 src/backend/utils/mmgr/shmem_alloc.c
+src/backend/utils/mmgr/shmem_area_search.c
 
 src/backend/storage/ipc/dsm.c
 src/backend/storage/ipc/dsm_impl.c
