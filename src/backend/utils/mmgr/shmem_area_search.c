@@ -34,6 +34,10 @@ static bool IsAddressFreeInProcess(ProcessMemoryMap *map, unsigned long address,
 static void *FindCommonFreeRegion(AllMemoryMaps *all_maps, Size size, unsigned long search_from);
 void *GetNewShmemArea(Size size, unsigned long search_from);
 
+/*
+ * Searches for region of memory of required size
+ * which is free in all processes from ProcArray.
+ */
 void *
 GetNewShmemArea(Size size, unsigned long search_from)
 {
@@ -65,6 +69,10 @@ GetNewShmemArea(Size size, unsigned long search_from)
     return address;
 }
 
+/*
+ * Searches for region of memory of required size
+ * which does not overlap with any memory map.
+ */
 static void *
 FindCommonFreeRegion(AllMemoryMaps *all_maps, Size size, unsigned long search_from)
 {
@@ -141,6 +149,9 @@ FindCommonFreeRegion(AllMemoryMaps *all_maps, Size size, unsigned long search_fr
     return NULL;
 }
 
+/*
+ * Checks if region of memory is free in process.
+ */
 static bool
 IsAddressFreeInProcess(ProcessMemoryMap *map, unsigned long address, Size size)
 {
@@ -158,6 +169,10 @@ IsAddressFreeInProcess(ProcessMemoryMap *map, unsigned long address, Size size)
     return true;
 }
 
+/*
+ * Fills 'pids' with pids of processes in ProcArray.
+ * Returns amount of them.
+ */
 static int
 GetActivePids(int *pids, int max_pids)
 {
@@ -183,6 +198,10 @@ GetActivePids(int *pids, int max_pids)
     return count;
 }
 
+/*
+ * Returns a structure with mmaps of all processes
+ * in 'pids'.
+ */
 static AllMemoryMaps *
 ReadMemoryMaps(int *pids, int num_pids)
 {
@@ -224,6 +243,11 @@ ReadMemoryMaps(int *pids, int num_pids)
     return all_maps;
 }
 
+/*
+ * Fills structure with mmaps of process
+ * referred by 'pid'. Returns amount of 
+ * mapped regions.
+ */
 static int 
 ReadMemoryMap(int pid, MemoryRegion *regions, int max_regions)
 {

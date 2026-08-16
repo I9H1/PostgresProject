@@ -100,6 +100,11 @@ static ShmemChunkHeader *ClaimFreeChunk(Size size, MemoryContext context);
 static void StartExtend(void);
 static void FinishExtend(void);
 
+/*
+ * Returns size of shared memory used by ShmemContext
+ * Must be called at the start of postmaster while
+ * initializing all static shared memory.
+ */
 Size 
 ShmemContextGetShmemSize(void)
 {
@@ -114,6 +119,10 @@ ShmemContextGetShmemSize(void)
     return size;
 }
 
+/*
+ * Initialize ShmemContext service structures and
+ * first memory block, located in static shared memory.
+ */
 void 
 ShmemContextInit(void)
 {
@@ -230,6 +239,10 @@ ShmemContextInit(void)
     }
 }
 
+/*
+ * Create new shared memory context. Note that all
+ * shared memory contexts must be descendents of RootShmemContext
+ */
 MemoryContext
 ShmemContextCreate(MemoryContext parent, const char *name)
 {
@@ -267,6 +280,10 @@ ShmemContextCreate(MemoryContext parent, const char *name)
     return (MemoryContext) context;
 }
 
+/*
+ * Shows if passed memory context lies within our
+ * shared memor blocks.
+ */
 static bool 
 IsContextShared(MemoryContext context)
 {
@@ -292,6 +309,10 @@ IsContextShared(MemoryContext context)
     return false;
 }
 
+/*
+ * Allocate a structure that is meant to contain
+ * pointers to structures, allocated by user
+ */
 void *
 ShmemGetOrCreateUserData(Size size)
 {
@@ -361,6 +382,9 @@ StartShmemContext(void)
     return true;
 }
 
+/*
+ * Allocate memory of requested size. See mcxt.c
+ */
 void *
 ShmemContextAlloc(MemoryContext context, Size size, int flags)
 {
@@ -416,6 +440,11 @@ ShmemContextAlloc(MemoryContext context, Size size, int flags)
     return result;
 }
 
+/*
+ * Indicate that adding a new block started
+ * or start waiting on conditional variable if 
+ * it has started already.
+ */
 static void
 StartExtend(void)
 {
@@ -438,6 +467,10 @@ StartExtend(void)
     ConditionVariableCancelSleep();
 }
 
+/*
+ * Indicate that adding new block ended and awaken 
+ * all processes, sleeping on conditional variable.
+ */
 static void
 FinishExtend(void)
 {
@@ -448,6 +481,10 @@ FinishExtend(void)
     ConditionVariableBroadcast(&ctl->extendCV);
 }
 
+/*
+ * Iterate through list of free chunks and find one
+ * of needed size.
+ */
 static ShmemChunkHeader *
 FindFreeChunk(Size size)
 {
@@ -466,6 +503,10 @@ FindFreeChunk(Size size)
     return NULL;
 }
 
+/*
+ * Mark found free chunk as not free,
+ * split it if neccessary.
+ */
 static ShmemChunkHeader *
 ClaimFreeChunk(Size size, MemoryContext context)
 {
@@ -511,6 +552,12 @@ ClaimFreeChunk(Size size, MemoryContext context)
     return chunk;
 }
 
+/*
+ * Tries to new block either by creating dsm_segment and
+ * mapping it on the same virtual addresses either by
+ * using a pre-reserved range of addresses or by
+ * finding an unused range of addresses of required size.
+ */
 static ShmemBlockInfo *
 AddNewBlock(void)
 {
@@ -714,6 +761,9 @@ AddNewBlock(void)
     return new_block;
 }
 
+/*
+ * Free shmem memory context. See mcxt.c
+ */
 void
 ShmemContextFree(void *pointer)
 {
@@ -784,6 +834,9 @@ ShmemContextFree(void *pointer)
     LWLockRelease(&ctl->lwLock);
 }
 
+/*
+ * Reallocate chunk of memory. See mcxt.c
+ */
 void *
 ShmemContextRealloc(void *pointer, Size size, int flags)
 {
@@ -864,6 +917,9 @@ ShmemContextRealloc(void *pointer, Size size, int flags)
     return result;
 }
 
+/*
+ * Reset shared memory context. See mcxt.c
+ */
 void
 ShmemContextReset(MemoryContext context)
 {
@@ -922,6 +978,9 @@ ShmemContextReset(MemoryContext context)
     LWLockRelease(&ctl->lwLock);
 }
 
+/*
+ * Delete shared memory context. See mcxt.c
+ */
 void
 ShmemContextDelete(MemoryContext context)
 {
@@ -937,6 +996,10 @@ ShmemContextDelete(MemoryContext context)
         pfree(set);
 }
 
+/*
+ * Returns root shared memory context,
+ * an ancestor to all shared memory contexts
+ */
 MemoryContext
 ShmemGetRootContext(void)
 {
@@ -947,6 +1010,10 @@ ShmemGetRootContext(void)
                                          + MAPPING_CONTROL_SIZE); 
 }
 
+/*
+ * Returns context, within which memory pointed 
+ * by pointer was allocated. See mcxt.c
+ */
 MemoryContext
 ShmemContextGetChunkContext(void *pointer)
 {
@@ -967,6 +1034,10 @@ ShmemContextGetChunkContext(void *pointer)
     return (MemoryContext) chunk->context;
 }
 
+/*
+ * Gets size of chunk, which pointer points to.
+ * See mxct.c
+ */
 Size
 ShmemContextGetChunkSpace(void *pointer)
 {
@@ -987,6 +1058,10 @@ ShmemContextGetChunkSpace(void *pointer)
     return chunk->size;
 }
 
+/*
+ * Returns true if all chunks within context
+ * are free. See mcxt.c
+ */
 bool
 ShmemContextIsEmpty(MemoryContext context)
 {
@@ -1018,6 +1093,10 @@ ShmemContextIsEmpty(MemoryContext context)
     return true;
 }
 
+/*
+ * Adds stats of context to passed stats variables.
+ * See mcxt.c
+ */
 void
 ShmemContextStats(MemoryContext context, MemoryStatsPrintFunc printfunc,
                   void *passthru, MemoryContextCounters *totals,

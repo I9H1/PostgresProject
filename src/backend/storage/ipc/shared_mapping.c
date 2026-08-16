@@ -1,3 +1,8 @@
+/*
+ * This file contains ProcBarrierSignal handler for
+ * ShmemContext. See shmem_alloc.c
+ */
+
 #include "postgres.h"
 #include "storage/shared_mapping.h"
 #include "storage/shmem.h"
@@ -5,6 +10,10 @@
 
 SharedMappingControl *sharedMappingControl = NULL;
 
+/*
+ * Attach created dsm segment.
+ * sharedMappingControl must be initialized is shared memory first.
+ */
 bool
 ProcessBarrierShmemAttachAll(void)
 {
@@ -49,6 +58,10 @@ ProcessBarrierShmemAttachAll(void)
     return true;
 }
 
+/*
+ * Detach existing dsm segment.
+ * sharedMappingControl must be initialized in shared memory first.
+ */
 bool
 ProcessBarrierShmemDetach(void)
 {
