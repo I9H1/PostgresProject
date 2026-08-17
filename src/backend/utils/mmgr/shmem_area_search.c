@@ -206,12 +206,13 @@ static AllMemoryMaps *
 ReadMemoryMaps(int *pids, int num_pids)
 {
     AllMemoryMaps *all_maps;
+    MemoryContext old;
     int processed = 0;
 
     if (!pids || num_pids <= 0)
         return NULL;
 
-    MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
+    old = MemoryContextSwitchTo(TopMemoryContext);
     all_maps = (AllMemoryMaps *) palloc(sizeof(AllMemoryMaps));
     MemoryContextSwitchTo(old);
 

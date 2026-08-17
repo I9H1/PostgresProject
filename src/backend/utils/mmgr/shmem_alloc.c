@@ -87,6 +87,9 @@ MemoryContext ShmemContextGetChunkContext(void *pointer);
 Size ShmemContextGetChunkSpace(void *pointer);
 bool ShmemContextIsEmpty(MemoryContext context);
 void ShmemContextCheck(MemoryContext context);
+void ShmemContextStats(MemoryContext context, MemoryStatsPrintFunc printfunc,
+                       void *passthru, MemoryContextCounters *totals,
+                       bool print_to_stderr);
 
 Size ShmemContextGetShmemSize(void);
 void ShmemContextInit(void);
@@ -183,7 +186,7 @@ ShmemContextInit(void)
         first_chunck = (ShmemChunkHeader *) ((char *) root_context + SHMEM_CONTEXT_SIZE);
         memset(first_chunck, 0, sizeof(ShmemChunkHeader));
         first_chunck->context = root_context;
-        first_chunck->is_free = false;
+        first_chunck->is_free = true;
         first_chunck->size = first_block->size - CHUNK_HEADER_SIZE;
         first_chunck->next = NULL;
         first_chunck->prev = NULL;
@@ -229,7 +232,7 @@ ShmemContextInit(void)
         ctl->user_data = NULL;
         ctl->num_blocks = 1;
         dlist_init(&ctl->free_chunks);
-        //dlist_push_head(&ctl->free_chunks, &first_chunck->free_node);
+        dlist_push_head(&ctl->free_chunks, &first_chunck->free_node);
         LWLockInitialize(&ctl->lwLock, LW_EXCLUSIVE);
         ConditionVariableInit(&ctl->extendCV);
     }

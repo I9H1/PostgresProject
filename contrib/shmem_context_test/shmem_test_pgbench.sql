@@ -1,0 +1,1 @@
+SELECT shmem_intensive_workload_def();

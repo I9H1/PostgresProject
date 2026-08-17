@@ -1,11 +1,12 @@
 /*
- * This file contains ProcBarrierSignal handler for
+ * This file contains ProcBarrierSignal handlers for
  * ShmemContext. See shmem_alloc.c
  */
 
 #include "postgres.h"
 #include "storage/shared_mapping.h"
 #include "storage/shmem.h"
+#include "storage/procarray.h"
 #include "miscadmin.h"
 
 SharedMappingControl *sharedMappingControl = NULL;
@@ -21,6 +22,9 @@ ProcessBarrierShmemAttachAll(void)
     void *addr;
     dsm_segment *segment;
     bool can_replace;
+
+    if (!IsBackendPid(MyProcPid))
+        return true;
 
     elog(LOG, "ProcessBarrierShmemAttachAll: pid=%d", MyProcPid);
 
@@ -68,8 +72,11 @@ ProcessBarrierShmemDetach(void)
     dsm_segment *segment;
     dsm_handle handle = DSM_HANDLE_INVALID;
     void *addr;
+
+    if (!IsBackendPid(MyProcPid))
+        return true;
     
-    elog(LOG, "detach");
+    elog(LOG, "ProcessBarrierShmemDetach: pid=%d", MyProcPid);
 
     LWLockAcquire(&sharedMappingControl->lwlock, LW_SHARED);
     handle = sharedMappingControl->handle;
@@ -77,9 +84,7 @@ ProcessBarrierShmemDetach(void)
     LWLockRelease(&sharedMappingControl->lwlock);
 
     if (addr == NULL || handle == DSM_HANDLE_INVALID)
-    {
         return true;
-    }
 
     segment = dsm_find_mapping(handle);
     if (segment == NULL)
